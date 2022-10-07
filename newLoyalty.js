@@ -18,8 +18,8 @@ run();
 
 async function run() {
   var loyaltyOptions = JSON.parse(fs.readFileSync('flux.loyalty.json'));
-  const dataFile = process.argv[2];
-  let data = JSON.parse(fs.readFileSync(dataFile));
+  //const dataFile = process.argv[2];
+  //let data = JSON.parse(fs.readFileSync(dataFile));
 
   const mongoConnection = new MongoClient(loyaltyOptions.mongo.uri, { useUnifiedTopology: true}, { useNewUrlParser: true }, { connectTimeoutMS: 30000 }, { keepAlive: 1})
   await mongoConnection.connect()
@@ -27,7 +27,10 @@ async function run() {
 
   console.log('Connected to Mongo database')
 
-  //console.log(data);
+  const loyaltyCollection = mongodb.collection('loyalty')
+  let data = await loyaltyCollection.find({uptime:{$gt: loyaltyOptions.uptime}}).toArray()
+
+  console.log(data);
   let payouts = [];
   let total = 0;
   for (var i = 0; i < data.length; i++) {
