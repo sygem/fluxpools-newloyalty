@@ -173,6 +173,12 @@ async function addLoyaltyToMongo(tx, payouts, mongodb, loyaltyOptions) {
   }
   const loyaltyDeetsCollection = mongodb.collection('loyalty_details')
   await loyaltyDeetsCollection.bulkWrite(bulkOps)
+
+  const statsCollection = mongodb.collection('stats')
+  const stats = await statsCollection.findOne({type:'newLoyaltyConfig'})
+  stats.value.loyalty.lastpayout = now
+  // now to insert into mongo
+  await statsCollection.updateOne({type:'newLoyaltyConfig'}, {$set: stats}, {upsert: true})
 }
 
 function getNetwork(network) {
