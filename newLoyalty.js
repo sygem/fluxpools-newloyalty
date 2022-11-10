@@ -2,6 +2,7 @@ var fs = require('fs');
 const bitcoin = require('bitgo-utxo-lib');
 const axios = require('axios');
 const { MongoClient } = require('mongodb')
+const daemonrpc = require('./daemonrpc')
 
 const readline = require('readline').createInterface({
   input: process.stdin,
@@ -17,136 +18,108 @@ function question(query) {
 run();
 
 async function run() {
-  var loyaltyOptions = JSON.parse(fs.readFileSync('flux.loyalty.json'));
+  var loyaltyOptions = JSON.parse(fs.readFileSync('neoxa.loyalty.json'));
   //const dataFile = process.argv[2];
   //let data = JSON.parse(fs.readFileSync(dataFile));
+  const data = await axios.get('https://api-neoxa.fluxpools.net/loyalty/7/97/json');
 
-  const mongoConnection = new MongoClient(loyaltyOptions.mongo.uri, { useUnifiedTopology: true}, { useNewUrlParser: true }, { connectTimeoutMS: 30000 }, { keepAlive: 1})
+  /*const mongoConnection = new MongoClient(loyaltyOptions.mongo.uri, { useUnifiedTopology: true}, { useNewUrlParser: true }, { connectTimeoutMS: 30000 }, { keepAlive: 1})
   await mongoConnection.connect()
   mongodb = mongoConnection.db(`${loyaltyOptions.mongo.database}`)
 
   console.log('Connected to Mongo database')
 
   const loyaltyCollection = mongodb.collection('loyalty')
-  let data = await loyaltyCollection.find({uptime:{$gt: loyaltyOptions.uptime}}).toArray()
+  let data = await loyaltyCollection.find({uptime:{$gt: loyaltyOptions.uptime}}).toArray()*/
 
-  console.log(data);
+  //console.log(data.data);
   let payouts = [];
+  let outputs = {};
   let total = 0;
-  for (var i = 0; i < data.length; i++) {
-    let loyalty = data[i];
-    let hashrate = loyalty.hashrate * 2 / 1000000;
+  for (var i = 0; i < data.data.length; i++) {
+    let loyalty = data.data[i];
+    let hashrate = loyalty.hashrate;
+    
     if (hashrate > loyaltyOptions.hashrateMax) hashrate = loyaltyOptions.hashrateMax;
     let payout = hashrate / loyaltyOptions.hashrateMax * loyaltyOptions.rewardMax;
     payouts.push({
       address: loyalty.miner,
-      amount: Math.floor(payout*1e8),
+      amount: payout,
       hashrate: hashrate,
     })
+    //var outObj = {}
+    //outObj[`${loyalty.miner}`] = payout
+    //outputs.push(outObj)
+    outputs[`${loyalty.miner}`] = Math.round(payout * 100000000) / 100000000
     total += payout;
   }
-  //console.log(payouts);
   console.log(`Total: ${total}`);
 
-  const addrData = await axios.get(`https://explorer.runonflux.io/api/addr/${loyaltyOptions.address}`)
-  //console.log(addrData.data);
-  if (addrData.data.balance < total) {
-    console.error('Not enough funds');
-    process.exit();
+  const client = new daemonrpc.Client({
+    port: (loyaltyOptions.testnet === true ? loyaltyOptions.daemon.testnetrpcport : loyaltyOptions.daemon.rpcport),
+    user: loyaltyOptions.daemon.rpcuser,
+    pass: loyaltyOptions.daemon.rpcpassword,
+    timeout: 60000
+  })
+
+  let utxos
+  try {
+    utxos = await client.listunspent(1, 999999999, [loyaltyOptions.address])
+  } catch (error) {
+    console.error(`Unable to get UTXOs for '${loyaltyOptions.address}'`)
+    console.error(error)
+    process.exit()
   }
 
-  const transaction = new bitcoin.TransactionBuilder(getNetwork(loyaltyOptions.network));
-  if (loyaltyOptions.networkVersion) {
-      transaction.setVersion(loyaltyOptions.networkVersion, loyaltyOptions.overwinter);
-  }
-  if (loyaltyOptions.networkVersionGroupId) {
-      transaction.setVersionGroupId(parseInt(loyaltyOptions.networkVersionGroupId, 16));
-  }
-
-  const utxos = await axios.get(`https://explorer.runonflux.io/api/addr/${loyaltyOptions.address}/utxo`);
   console.log("Loyalty: UTXOs");
-  // console.log(utxos);
+  //console.log(utxos);
   var addedTotal = 0;
-  var history = [];
-  for (var i=0;i<utxos.data.length;i++) {
-      const utxo = utxos.data[i];
-      if ((utxo.satoshis > 0 && utxo.confirmations > 100) || (utxo.confirmations > 1 && utxo.satoshis > 75000000)) { // ignore any pool rewards
-          transaction.addInput(utxo.txid, utxo.vout);
-          history.push({satoshis: utxo.satoshis})
+  var inputs = [];
+  for (var i=0;i<utxos.length;i++) {
+      const utxo = utxos[i];
+      if ((utxo.amount > 0 && utxo.confirmations > 100)) {
+          //transaction.addInput(utxo.txid, utxo.vout);
+          inputs.push({txid: utxo.txid, vout: utxo.vout})
           console.log(`Added utxo: ${JSON.stringify(utxo)}`)
-          addedTotal += utxo.satoshis;
+          addedTotal += utxo.amount;
           console.log(addedTotal);
-          if (addedTotal > (total+loyaltyOptions.transactionFee)*1e8) {
+          if (addedTotal > (total+loyaltyOptions.transactionFee)) {
               break;  
           }
       }
   }
 
-  // add outputs to the transaction
-  var outputTotal = 0;
-  for (let payout in payouts) {
-      if (payouts[payout].amount > 0) {
-          transaction.addOutput(payouts[payout].address, payouts[payout].amount);
-          outputTotal += payouts[payout].amount;
-        }
-  }
-  console.log(`Added total: ${addedTotal}`)
-  console.log(`Output total: ${outputTotal}`)
-  // add another output to collect the change
-  console.log("Change amount: "+Math.floor(addedTotal - outputTotal - (loyaltyOptions.transactionFee*1e8)));
-  transaction.addOutput(loyaltyOptions.address, Math.floor(addedTotal - outputTotal - (loyaltyOptions.transactionFee*1e8)));
+  console.log(`Added Total: ${addedTotal}`);
+  console.log(`Output Total: ${total}`);
+  console.log(`TX Fee: ${loyaltyOptions.transactionFee}`);
+
+  console.log("Change amount: "+(addedTotal - total - loyaltyOptions.transactionFee));
+  //transaction.addOutput(loyaltyOptions.address, Math.floor(addedTotal - outputTotal - (loyaltyOptions.transactionFee*1e8)));
+  outputs[`${loyaltyOptions.address}`] = Math.round((addedTotal - total - loyaltyOptions.transactionFee) * 100000000) / 100000000
+
+  console.log(inputs)
+  console.log(outputs)
+
+  let rawhex = await client.createRawTransaction(inputs, outputs)
+  console.log(typeof(rawhex))
+  console.log('Signing');
+  let signedTx = await client.signrawtransaction(rawhex)
+  console.log('Signed');
   
-  var keyPair = bitcoin.ECPair.fromWIF(loyaltyOptions.privatekey, getNetwork(loyaltyOptions.network))
-  const hashType = bitcoin.Transaction.SIGHASH_ALL
-  for (let i = 0; i < transaction.inputs.length; i++) {
-      transaction.sign(i, keyPair, null, hashType, history[i].satoshis);
+  if (signedTx.errors || !signedTx.hex || !signedTx.complete) {
+    console.error(`Signed transaction has errors: ${signedTx}`)
+    process.exit()
   }
-
-  const result = transaction.build();
-  //console.log(result.toHex())
-
   if (loyaltyOptions.test) {
-    console.log('Calling decoderawtransaction');
-    axios.post('https://api.runonflux.io/daemon/decoderawtransaction',{
-      hexstring: result.toHex(),
-    },{
-      headers: {
-          'Content-Length': 0,
-          'Content-Type': 'text/plain'
-      },
-      responseType: 'json'
-    }).then(async (response) => {
-      //console.log(response.data);
-      if (response.data.status == 'success') {
-        console.log(`TXID: ${response.data.data.txid}`)
-        process.exit()
-      } else {
-        console.log('Fail:')
-        console.log(JSON.stringify(reponse.data, null, 2))
-      }
-    });
+    let decoded = await client.decodeRawTransaction(signedTx.hex)
+    console.log(decoded)
   } else {
-    console.log('Calling sendrawtransaction');
-    axios.post('https://api.runonflux.io/daemon/sendrawtransaction',{
-      hexstring: result.toHex(),
-    },{
-      headers: {
-          'Content-Length': 0,
-          'Content-Type': 'text/plain'
-      },
-      responseType: 'json'
-    }).then(async (response) => {
-      console.log(response.data);
-      if (response.data.status == 'success') {
-        console.log(`TXID: ${response.data.data}`)
-        await addLoyaltyToMongo(response.data.data, payouts, mongodb, loyaltyOptions)
-        process.exit()
-      } else {
-        console.log('Fail:')
-        console.log(JSON.stringify(reponse.data, null, 2))
-      }
-    });
+    let txid = await client.sendRawTransaction(signedTx)
+    console.log(txid)
+    //await addLoyaltyToMongo(response.data.data, payouts, mongodb, loyaltyOptions)
   }
+
+  process.exit()
 
 }
 
@@ -182,9 +155,5 @@ async function addLoyaltyToMongo(tx, payouts, mongodb, loyaltyOptions) {
   stats.value.loyalty.lastpayout = now
   // now to insert into mongo
   await statsCollection.updateOne({type:'newLoyaltyConfig'}, {$set: stats}, {upsert: true})
-}
-
-function getNetwork(network) {
-  return bitcoin.networks[network];
 }
 
